@@ -1,0 +1,8 @@
+[env]
+NORTHSTAR_PLUGIN_INSTALL_NAME = "bullet-physics"
+CMAKE_GENERATOR = "Ninja"
+CC = "clang-cl"
+CXX = "clang-cl"
+CMAKE_C_COMPILER = "clang-cl"
+CMAKE_CXX_COMPILER = "clang-cl"
+
