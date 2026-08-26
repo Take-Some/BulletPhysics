@@ -401,4 +401,5 @@ pub unsafe extern "C" fn newengine_plugin_signature_v1() -> PluginSignatureV1 {
     }
 }
 
+export_newengine_plugin_descriptor_v2!(crate::plugin_definition::descriptor_v2);
 export_newengine_plugin!(module = PhysicsPlugin::default());

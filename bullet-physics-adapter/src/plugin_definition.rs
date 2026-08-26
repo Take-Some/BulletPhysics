@@ -44,6 +44,11 @@ pub(crate) fn descriptor() -> PluginDescriptor {
     PLUGIN_DEFINITION.descriptor()
 }
 
+/// Native discovery metadata for first-party composition planning.
+pub(crate) fn descriptor_v2() -> PluginDescriptorV2 {
+    PLUGIN_DEFINITION.descriptor_v2()
+}
+
 #[cfg(test)]
 mod abi_tests {
     use super::*;

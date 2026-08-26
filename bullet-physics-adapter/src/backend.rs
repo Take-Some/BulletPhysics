@@ -5,7 +5,8 @@ use std::time::Duration;
 use nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
 use newengine_physics_api::*;
 use rsbullet_core::{
-    CollisionGeometry, CollisionId, CollisionShapeOptions, Mode, MultiBodyCreateOptions, PhysicsClient,
+    CollisionGeometry, CollisionId, CollisionShapeOptions, Mode, MultiBodyCreateOptions,
+    PhysicsClient,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,9 +69,9 @@ impl BulletPacketPhysicsBackend {
 
         for collider in &input.colliders {
             if self.sync_authored_collider(collider)? {
-                output
-                    .events
-                    .push(PhysicsEventDto::BodyCreated { entity: collider.entity });
+                output.events.push(PhysicsEventDto::BodyCreated {
+                    entity: collider.entity,
+                });
             }
         }
 
@@ -81,9 +82,9 @@ impl BulletPacketPhysicsBackend {
             .collect::<HashSet<_>>();
         for body in &input.bodies {
             if self.sync_frame_body(body)? {
-                output
-                    .events
-                    .push(PhysicsEventDto::BodyCreated { entity: body.entity });
+                output.events.push(PhysicsEventDto::BodyCreated {
+                    entity: body.entity,
+                });
             }
         }
 
@@ -101,7 +102,8 @@ impl BulletPacketPhysicsBackend {
                 .push(PhysicsEventDto::BodyDestroyed { entity });
         }
 
-        output.report.commands_applied = self.apply_commands(&input.commands, &mut output.events)?;
+        output.report.commands_applied =
+            self.apply_commands(&input.commands, &mut output.events)?;
 
         self.client.step_simulation().map_err(bullet_error)?;
         self.collect_body_outputs(&mut output)?;
@@ -213,7 +215,7 @@ impl BulletPacketPhysicsBackend {
             if let Err(error) = self.client.reset_base_velocity(
                 body_id,
                 Some(vec3_f64(snapshot.linear_velocity)),
-                None,
+                Some(vec3_f64(snapshot.angular_velocity)),
             ) {
                 let _ = self.client.remove_body(body_id);
                 let _ = self.client.remove_collision_shape(collision_shape_id);
@@ -249,9 +251,10 @@ impl BulletPacketPhysicsBackend {
         }
 
         let shape = ShapeSource::Authored(snapshot.collider.clone());
-        let recreate = self.records.get(&snapshot.entity).is_some_and(|record| {
-            !record.persistent || record.shape != shape
-        });
+        let recreate = self
+            .records
+            .get(&snapshot.entity)
+            .is_some_and(|record| !record.persistent || record.shape != shape);
         if recreate {
             self.destroy_body(snapshot.entity)?;
         }
@@ -309,7 +312,9 @@ impl BulletPacketPhysicsBackend {
         options.base.pose = physics_pose(position, rotation);
         options.base.collision_shape = CollisionId(collision_shape_id);
         options.use_maximal_coordinates = true;
-        self.client.create_multi_body(&options).map_err(bullet_error)
+        self.client
+            .create_multi_body(&options)
+            .map_err(bullet_error)
     }
 
     fn create_collision_shape(&mut self, source: &ShapeSource) -> Result<i32, String> {
@@ -426,7 +431,9 @@ impl BulletPacketPhysicsBackend {
             return Ok(());
         };
         self.body_to_entity.remove(&record.body_id);
-        self.client.remove_body(record.body_id).map_err(bullet_error)?;
+        self.client
+            .remove_body(record.body_id)
+            .map_err(bullet_error)?;
         self.client
             .remove_collision_shape(record.collision_shape_id)
             .map_err(bullet_error)?;
@@ -464,6 +471,7 @@ impl BulletPacketPhysicsBackend {
             output.velocity_updates.push(PhysicsBodyVelocityUpdate {
                 entity,
                 linear_velocity: [velocity[0] as f32, velocity[1] as f32, velocity[2] as f32],
+                angular_velocity: [velocity[3] as f32, velocity[4] as f32, velocity[5] as f32],
             });
         }
         Ok(())
@@ -500,10 +508,7 @@ impl BulletPacketPhysicsBackend {
             }
 
             let (pair, normal) = if entity_a <= entity_b {
-                (
-                    (entity_a, entity_b),
-                    vec3_f32(point.contact_normal_on_b),
-                )
+                ((entity_a, entity_b), vec3_f32(point.contact_normal_on_b))
             } else {
                 (
                     (entity_b, entity_a),
@@ -536,11 +541,13 @@ impl BulletPacketPhysicsBackend {
                 normal: sample.normal,
                 impulse: sample.impulse,
             };
-            output.events.push(if self.active_contacts.contains(&(a, b)) {
-                PhysicsEventDto::ContactPersist(contact)
-            } else {
-                PhysicsEventDto::ContactBegin(contact)
-            });
+            output
+                .events
+                .push(if self.active_contacts.contains(&(a, b)) {
+                    PhysicsEventDto::ContactPersist(contact)
+                } else {
+                    PhysicsEventDto::ContactBegin(contact)
+                });
         }
         let current_pairs = current.keys().copied().collect::<BTreeSet<_>>();
         for &(a, b) in self.active_contacts.difference(&current_pairs) {
@@ -561,7 +568,9 @@ impl BulletPacketPhysicsBackend {
             .take(self.max_queries_per_frame as usize)
         {
             if let PhysicsQueryKindDto::Ray { origin, dir, max_t } = query.kind {
-                if let Some(hit) = self.cast_ray(query.seq, origin, dir, max_t)? {
+                if let Some(hit) =
+                    self.cast_ray(query.seq, query.ignore_entity, origin, dir, max_t)?
+                {
                     hits.push(hit);
                 }
             }
@@ -572,6 +581,7 @@ impl BulletPacketPhysicsBackend {
     fn cast_ray(
         &mut self,
         seq: u64,
+        ignore_entity: Option<u64>,
         origin: PhysicsVec3,
         dir: PhysicsVec3,
         max_t: f32,
@@ -592,7 +602,11 @@ impl BulletPacketPhysicsBackend {
             (origin[2] + unit[2] * max_t) as f64,
         ];
 
-        let ignored_body = self.records.get(&seq).map(|record| record.body_id);
+        let ignored_entity = ignore_entity.unwrap_or(seq);
+        let ignored_body = self
+            .records
+            .get(&ignored_entity)
+            .map(|record| record.body_id);
         if let Some(body_id) = ignored_body {
             self.client
                 .set_collision_filter_group_mask(body_id, -1, 0, 0)
@@ -600,16 +614,12 @@ impl BulletPacketPhysicsBackend {
         }
         let ray_result = self.client.ray_test(ray_from, ray_to, None, Some(1));
         if let Some(body_id) = ignored_body {
-            self
-                .client
+            self.client
                 .set_collision_filter_group_mask(body_id, -1, 1, -1)
                 .map_err(bullet_error)?;
         }
         let ray_hits = ray_result.map_err(bullet_error)?;
-        let Some(hit) = ray_hits
-            .into_iter()
-            .find(|hit| hit.object_unique_id >= 0)
-        else {
+        let Some(hit) = ray_hits.into_iter().find(|hit| hit.object_unique_id >= 0) else {
             return Ok(None);
         };
         let Some(&entity) = self.body_to_entity.get(&hit.object_unique_id) else {
@@ -681,11 +691,7 @@ fn physics_pose(position: PhysicsVec3, rotation: PhysicsQuat) -> Isometry3<f64> 
         UnitQuaternion::identity()
     };
     Isometry3::from_parts(
-        Translation3::new(
-            position[0] as f64,
-            position[1] as f64,
-            position[2] as f64,
-        ),
+        Translation3::new(position[0] as f64, position[1] as f64, position[2] as f64),
         rotation,
     )
 }
@@ -738,15 +744,22 @@ fn mesh_indices(mesh: &MeshColliderDto) -> Result<Vec<i32>, String> {
     let vertex_count = mesh.vertices.len() as u32;
     let mut out = Vec::with_capacity(mesh.triangles.len() * 3);
     for triangle in &mesh.triangles {
-        if triangle.iter().any(|index| *index >= vertex_count || *index > i32::MAX as u32) {
-            return Err(format!("mesh collider triangle index out of range: {triangle:?}"));
+        if triangle
+            .iter()
+            .any(|index| *index >= vertex_count || *index > i32::MAX as u32)
+        {
+            return Err(format!(
+                "mesh collider triangle index out of range: {triangle:?}"
+            ));
         }
         out.extend(triangle.iter().map(|index| *index as i32));
     }
     Ok(out)
 }
 
-fn heightfield_mesh(heightfield: &HeightfieldColliderDto) -> Result<(Vec<[f64; 3]>, Vec<i32>), String> {
+fn heightfield_mesh(
+    heightfield: &HeightfieldColliderDto,
+) -> Result<(Vec<[f64; 3]>, Vec<i32>), String> {
     let nx = heightfield.sample_count_x as usize;
     let nz = heightfield.sample_count_z as usize;
     let sample_count = nx
@@ -821,6 +834,7 @@ mod tests {
             position,
             rotation: [0.0, 0.0, 0.0, 1.0],
             linear_velocity: [0.0, 0.0, 0.0],
+            angular_velocity: [0.0, 0.0, 0.0],
             bounds_min: [-10.0, -10.0, -10.0],
             bounds_max: [10.0, 10.0, 10.0],
         }
