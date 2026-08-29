@@ -1434,6 +1434,7 @@ name = "newengine-asset-format-nef8"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "flate2",
  "newengine-assets-api",
  "newengine-contract-api",
  "serde",
@@ -1477,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "newengine-audio-api"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "newengine-contract-api",
  "newengine-service-api",

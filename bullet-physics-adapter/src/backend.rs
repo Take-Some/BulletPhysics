@@ -5,8 +5,8 @@ use std::time::Duration;
 use nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
 use newengine_physics_api::*;
 use rsbullet_core::{
-    CollisionGeometry, CollisionId, CollisionShapeOptions, Mode, MultiBodyCreateOptions,
-    PhysicsClient,
+    CollisionGeometry, CollisionId, CollisionShapeOptions, DynamicsUpdate, Mode,
+    MultiBodyCreateOptions, PhysicsClient,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +24,7 @@ struct BodyRecord {
     persistent: bool,
     produces_output: bool,
     casts_contacts: bool,
+    material: PhysicsMaterialDto,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -174,7 +175,10 @@ impl BulletPacketPhysicsBackend {
 
         let shape = ShapeSource::Primitive(snapshot.shape);
         let recreate = self.records.get(&snapshot.entity).is_some_and(|record| {
-            record.persistent || record.kind != snapshot.kind || record.shape != shape
+            record.persistent
+                || record.kind != snapshot.kind
+                || record.shape != shape
+                || record.material != snapshot.material
         });
         if recreate {
             self.destroy_body(snapshot.entity)?;
@@ -211,6 +215,34 @@ impl BulletPacketPhysicsBackend {
             }
         };
 
+        let cylinder_motion = matches!(snapshot.shape, CollisionShapeDto::Cylinder { .. });
+        let dynamics = DynamicsUpdate {
+            lateral_friction: Some(snapshot.material.friction.clamp(0.0, 10.0) as f64),
+            rolling_friction: cylinder_motion.then_some(0.0025),
+            spinning_friction: cylinder_motion.then_some(0.0015),
+            linear_damping: cylinder_motion.then_some(0.015),
+            angular_damping: cylinder_motion.then_some(0.025),
+            ..DynamicsUpdate::default()
+        };
+        if let Err(error) = self.client.change_dynamics(body_id, -1, &dynamics) {
+            let _ = self.client.remove_body(body_id);
+            let _ = self.client.remove_collision_shape(collision_shape_id);
+            return Err(bullet_error(error));
+        }
+
+        // Keep restitution in its own command. Bullet Direct has historically accepted the
+        // mixed friction/damping update while silently retaining zero restitution on maximal-
+        // coordinate bodies; a dedicated update makes the contact coefficient observable.
+        let restitution = DynamicsUpdate {
+            restitution: Some(snapshot.material.restitution.clamp(0.0, 1.0) as f64),
+            ..DynamicsUpdate::default()
+        };
+        if let Err(error) = self.client.change_dynamics(body_id, -1, &restitution) {
+            let _ = self.client.remove_body(body_id);
+            let _ = self.client.remove_collision_shape(collision_shape_id);
+            return Err(bullet_error(error));
+        }
+
         if snapshot.kind == PhysicsBodyKindDto::Dynamic {
             if let Err(error) = self.client.reset_base_velocity(
                 body_id,
@@ -234,6 +266,7 @@ impl BulletPacketPhysicsBackend {
                 persistent: false,
                 produces_output: snapshot.kind != PhysicsBodyKindDto::Static,
                 casts_contacts: snapshot.flags.casts_contacts,
+                material: snapshot.material,
             },
         );
         Ok(true)
@@ -251,10 +284,9 @@ impl BulletPacketPhysicsBackend {
         }
 
         let shape = ShapeSource::Authored(snapshot.collider.clone());
-        let recreate = self
-            .records
-            .get(&snapshot.entity)
-            .is_some_and(|record| !record.persistent || record.shape != shape);
+        let recreate = self.records.get(&snapshot.entity).is_some_and(|record| {
+            !record.persistent || record.shape != shape || record.material != snapshot.material
+        });
         if recreate {
             self.destroy_body(snapshot.entity)?;
         }
@@ -295,6 +327,7 @@ impl BulletPacketPhysicsBackend {
                 persistent: true,
                 produces_output: false,
                 casts_contacts: snapshot.flags.casts_contacts,
+                material: snapshot.material,
             },
         );
         Ok(true)
@@ -344,6 +377,21 @@ impl BulletPacketPhysicsBackend {
                 let geometry = CollisionGeometry::Capsule { radius, height };
                 self.client
                     .create_collision_shape(&geometry, None::<CollisionShapeOptions>)
+                    .map_err(bullet_error)
+            }
+            ShapeSource::Primitive(CollisionShapeDto::Cylinder {
+                radius,
+                half_height,
+            }) => {
+                let radius = positive(*radius, "cylinder radius")? as f64;
+                let height = positive(*half_height, "cylinder half height")? as f64 * 2.0;
+                let geometry = CollisionGeometry::Cylinder { radius, height };
+                let transform = Isometry3::from_parts(
+                    Translation3::new(0.0, 0.0, 0.0),
+                    UnitQuaternion::from_euler_angles(-std::f64::consts::FRAC_PI_2, 0.0, 0.0),
+                );
+                self.client
+                    .create_collision_shape(&geometry, Some(CollisionShapeOptions::from(transform)))
                     .map_err(bullet_error)
             }
             ShapeSource::Authored(PhysicsColliderDto::Mesh(mesh)) => {
@@ -482,6 +530,31 @@ impl BulletPacketPhysicsBackend {
         dt: f32,
         output: &mut PhysicsFrameOutput,
     ) -> Result<(), String> {
+        let body_metadata_source = self
+            .records
+            .iter()
+            .map(|(&entity, record)| (entity, record.body_id, record.material))
+            .collect::<Vec<_>>();
+        let mut body_metadata =
+            HashMap::<PhysicsEntityKey, (PhysicsVec3, PhysicsMaterialDto)>::new();
+        for (entity, body_id, material) in body_metadata_source {
+            let velocity = self
+                .client
+                .get_base_velocity(body_id)
+                .map_err(bullet_error)?;
+            body_metadata.insert(
+                entity,
+                (
+                    sanitize_contact_velocity([
+                        velocity[0] as f32,
+                        velocity[1] as f32,
+                        velocity[2] as f32,
+                    ]),
+                    material,
+                ),
+            );
+        }
+
         let points = self
             .client
             .get_contact_points(None, None, None, None)
@@ -534,12 +607,29 @@ impl BulletPacketPhysicsBackend {
         }
 
         for (&(a, b), sample) in &current {
+            let (relative_velocity, materials) =
+                match (body_metadata.get(&a), body_metadata.get(&b)) {
+                    (Some((velocity_a, material_a)), Some((velocity_b, material_b))) => (
+                        Some([
+                            velocity_b[0] - velocity_a[0],
+                            velocity_b[1] - velocity_a[1],
+                            velocity_b[2] - velocity_a[2],
+                        ]),
+                        PhysicsContactMaterialPairDto {
+                            a: Some(*material_a),
+                            b: Some(*material_b),
+                        },
+                    ),
+                    _ => (None, PhysicsContactMaterialPairDto::default()),
+                };
             let contact = PhysicsContactEventDto {
                 a,
                 b,
                 point: sample.point,
                 normal: sample.normal,
                 impulse: sample.impulse,
+                relative_velocity,
+                materials,
             };
             output
                 .events
@@ -700,6 +790,17 @@ fn negate(value: PhysicsVec3) -> PhysicsVec3 {
     [-value[0], -value[1], -value[2]]
 }
 
+#[inline]
+fn sanitize_contact_velocity(value: PhysicsVec3) -> PhysicsVec3 {
+    value.map(|component| {
+        if component.is_finite() {
+            component
+        } else {
+            0.0
+        }
+    })
+}
+
 fn body_mass(kind: PhysicsBodyKindDto, shape: CollisionShapeDto, density: f32) -> f64 {
     if kind != PhysicsBodyKindDto::Dynamic {
         return 0.0;
@@ -723,10 +824,16 @@ fn body_mass(kind: PhysicsBodyKindDto, shape: CollisionShapeDto, density: f32) -
             let r = radius.abs() as f64;
             PI * r * r * (2.0 * half_height.abs() as f64) + 4.0 / 3.0 * PI * r.powi(3)
         }
+        CollisionShapeDto::Cylinder {
+            radius,
+            half_height,
+        } => {
+            let r = radius.abs() as f64;
+            PI * r * r * (2.0 * half_height.abs() as f64)
+        }
     };
     (density * volume).max(1.0e-4)
 }
-
 fn mesh_vertices(mesh: &MeshColliderDto) -> Result<Vec<[f64; 3]>, String> {
     if mesh.vertices.is_empty() {
         return Err("mesh collider has no vertices".to_owned());
@@ -825,6 +932,7 @@ mod tests {
                 is_trigger: false,
                 participates_in_queries: true,
                 casts_contacts: true,
+                continuous_collision: false,
             },
             material: PhysicsMaterialDto {
                 friction: 0.8,
@@ -862,6 +970,113 @@ mod tests {
         assert!(output.pose_updates.iter().any(|pose| pose.entity == 2));
         assert_eq!(output.report.dynamic_bodies, 1);
         assert_eq!(output.report.static_bodies, 1);
+    }
+
+    #[test]
+    fn bullet_cylinder_preserves_brass_contact_dynamics() {
+        let mut backend = BulletPacketPhysicsBackend::new(128, 32).expect("Bullet direct world");
+        let mut shell = body(
+            7,
+            PhysicsBodyKindDto::Dynamic,
+            CollisionShapeDto::Cylinder {
+                radius: 0.00635,
+                half_height: 0.02940,
+            },
+            [0.0, 0.2, 0.0],
+        );
+        shell.material.friction = 0.28;
+        shell.material.restitution = 0.34;
+        shell.material.density = 1610.0;
+        shell.linear_velocity = [1.8, -1.4, 0.4];
+        shell.angular_velocity = [18.0, 11.0, 23.0];
+        let mut input = PhysicsFrameInput::empty(1, 1, 1.0 / 120.0);
+        input.bodies.push(shell);
+        backend.step_frame(input).expect("Bullet shell step");
+        let record = backend.records.get(&7).expect("shell body record");
+        let info = backend
+            .client
+            .get_dynamics_info(record.body_id, -1)
+            .expect("shell dynamics info");
+        assert!((info.mass - 0.011992).abs() < 0.0002, "mass={}", info.mass);
+        assert!((info.lateral_friction - 0.28).abs() < 1.0e-6);
+        // Bullet Direct omits rigid-body restitution from CMD_GET_DYNAMICS_INFO; verify it
+        // behaviorally in the rebound test below instead of trusting the zero-filled field.
+        assert!((info.rolling_friction - 0.0025).abs() < 1.0e-6);
+        assert!((info.spinning_friction - 0.0015).abs() < 1.0e-6);
+        assert!((info.linear_damping - 0.015).abs() < 1.0e-6);
+        assert!((info.angular_damping - 0.025).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn bullet_cylinder_rebounds_and_retains_angular_motion() {
+        let mut backend = BulletPacketPhysicsBackend::new(128, 32).expect("Bullet direct world");
+        let mut ground = body(
+            1,
+            PhysicsBodyKindDto::Static,
+            CollisionShapeDto::Box {
+                half_extents: [2.0, 0.05, 2.0],
+            },
+            [0.0, -0.05, 0.0],
+        );
+        ground.material.friction = 0.6;
+        ground.material.restitution = 1.0;
+
+        let mut shell = body(
+            7,
+            PhysicsBodyKindDto::Dynamic,
+            CollisionShapeDto::Cylinder {
+                radius: 0.00635,
+                half_height: 0.02940,
+            },
+            [0.0, 0.12, 0.0],
+        );
+        shell.material.friction = 0.28;
+        shell.material.restitution = 0.34;
+        shell.material.density = 1610.0;
+        shell.linear_velocity = [0.9, -1.8, 0.25];
+        shell.angular_velocity = [18.0, 11.0, 23.0];
+
+        let mut saw_contact = false;
+        let mut saw_enriched_contact = false;
+        let mut max_upward = f32::NEG_INFINITY;
+        let mut max_angular = 0.0_f32;
+        for tick in 1..=80_u64 {
+            let mut input = PhysicsFrameInput::empty(tick, tick, 1.0 / 240.0);
+            input.bodies.push(ground.clone());
+            input.bodies.push(shell.clone());
+            let output = backend
+                .step_frame(input)
+                .expect("Bullet shell simulation step");
+            for event in &output.events {
+                if let PhysicsEventDto::ContactBegin(contact) = event {
+                    if contact.a == 1 && contact.b == 7 {
+                        saw_contact = true;
+                        saw_enriched_contact |= contact.relative_velocity.is_some()
+                            && contact.materials.a.is_some()
+                            && contact.materials.b.is_some();
+                        assert_eq!(contact.materials.a.unwrap().friction, 0.6);
+                        assert_eq!(contact.materials.b.unwrap().restitution, 0.34);
+                    }
+                }
+            }
+            if let Some(velocity) = output.velocity_updates.iter().find(|v| v.entity == 7) {
+                if saw_contact {
+                    max_upward = max_upward.max(velocity.linear_velocity[1]);
+                    let a = velocity.angular_velocity;
+                    max_angular = max_angular.max((a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt());
+                }
+            }
+        }
+        assert!(saw_enriched_contact);
+        assert!(saw_contact, "shell never contacted the floor");
+        assert!(
+            max_upward > 0.05,
+            "shell never rebounded: max_upward={max_upward}"
+        );
+        assert!(
+            max_angular > 1.0,
+            "shell lost angular motion too aggressively: {max_angular}"
+        );
     }
 
     #[test]
