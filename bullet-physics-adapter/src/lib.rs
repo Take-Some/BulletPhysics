@@ -235,7 +235,10 @@ impl PhysicsBackendService {
     }
 
     fn with_backend<T>(&self, action: impl FnOnce(&mut PacketPhysicsBackend) -> T) -> T {
-        let mut guard = self.backend.lock().unwrap_or_else(|error| error.into_inner());
+        let mut guard = self
+            .backend
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         action(&mut guard)
     }
 
@@ -329,9 +332,7 @@ impl ServiceV1 for PhysicsBackendService {
                 };
                 Self::ok_json(&self.invoke_service(request))
             }
-            unknown => RResult::RErr(
-                format!("physics service: unknown method '{unknown}'").into(),
-            ),
+            unknown => RResult::RErr(format!("physics service: unknown method '{unknown}'").into()),
         }
     }
 }

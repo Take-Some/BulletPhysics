@@ -1437,6 +1437,7 @@ dependencies = [
  "flate2",
  "newengine-assets-api",
  "newengine-contract-api",
+ "newengine-vfx-api",
  "serde",
  "serde_json",
 ]
@@ -1478,7 +1479,7 @@ dependencies = [
 
 [[package]]
 name = "newengine-audio-api"
-version = "0.5.0"
+version = "0.9.1"
 dependencies = [
  "newengine-contract-api",
  "newengine-service-api",
@@ -1571,6 +1572,16 @@ dependencies = [
  "newengine-runtime-unit-api",
  "newengine-service-api",
  "newengine-service-kit",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "newengine-entity-api"
+version = "0.1.0"
+dependencies = [
+ "newengine-math",
+ "newengine-service-api",
  "serde",
  "serde_json",
 ]
@@ -1853,6 +1864,15 @@ name = "newengine-ulog-api"
 version = "0.1.0"
 dependencies = [
  "log",
+ "serde_json",
+]
+
+[[package]]
+name = "newengine-vfx-api"
+version = "0.1.0"
+dependencies = [
+ "newengine-entity-api",
+ "serde",
  "serde_json",
 ]
 

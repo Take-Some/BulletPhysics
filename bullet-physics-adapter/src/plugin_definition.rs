@@ -7,8 +7,7 @@ use newengine_physics_api::{
 use newengine_plugin_api::prelude::*;
 
 use crate::{
-    PHYSICS_BACKEND_ID, PHYSICS_BACKEND_NAME, PHYSICS_BACKEND_VERSION,
-    PHYSICS_PROVIDER_GATEWAY_ID,
+    PHYSICS_BACKEND_ID, PHYSICS_BACKEND_NAME, PHYSICS_BACKEND_VERSION, PHYSICS_PROVIDER_GATEWAY_ID,
 };
 
 const PHYSICS_SERVICES: &[PluginServiceDefinition] = &[plugin_service(
@@ -68,4 +67,3 @@ mod abi_tests {
         );
     }
 }
-

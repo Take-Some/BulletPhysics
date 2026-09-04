@@ -5,4 +5,3 @@ mod northstar_plugin_build {
 fn main() {
     northstar_plugin_build::run();
 }
-

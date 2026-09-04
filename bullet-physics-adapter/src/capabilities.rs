@@ -25,4 +25,3 @@ pub(crate) fn backend_capabilities(
         },
     }
 }
-

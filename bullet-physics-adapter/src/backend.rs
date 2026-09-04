@@ -25,6 +25,8 @@ struct BodyRecord {
     produces_output: bool,
     casts_contacts: bool,
     material: PhysicsMaterialDto,
+    linear_damping: Option<f32>,
+    angular_damping: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -179,6 +181,8 @@ impl BulletPacketPhysicsBackend {
                 || record.kind != snapshot.kind
                 || record.shape != shape
                 || record.material != snapshot.material
+                || record.linear_damping != snapshot.linear_damping
+                || record.angular_damping != snapshot.angular_damping
         });
         if recreate {
             self.destroy_body(snapshot.entity)?;
@@ -220,8 +224,14 @@ impl BulletPacketPhysicsBackend {
             lateral_friction: Some(snapshot.material.friction.clamp(0.0, 10.0) as f64),
             rolling_friction: cylinder_motion.then_some(0.0025),
             spinning_friction: cylinder_motion.then_some(0.0015),
-            linear_damping: cylinder_motion.then_some(0.015),
-            angular_damping: cylinder_motion.then_some(0.025),
+            linear_damping: snapshot.linear_damping
+                .filter(|value| value.is_finite())
+                .map(|value| value.clamp(0.0, 20.0) as f64)
+                .or_else(|| cylinder_motion.then_some(0.015)),
+            angular_damping: snapshot.angular_damping
+                .filter(|value| value.is_finite())
+                .map(|value| value.clamp(0.0, 20.0) as f64)
+                .or_else(|| cylinder_motion.then_some(0.025)),
             ..DynamicsUpdate::default()
         };
         if let Err(error) = self.client.change_dynamics(body_id, -1, &dynamics) {
@@ -267,6 +277,8 @@ impl BulletPacketPhysicsBackend {
                 produces_output: snapshot.kind != PhysicsBodyKindDto::Static,
                 casts_contacts: snapshot.flags.casts_contacts,
                 material: snapshot.material,
+                linear_damping: snapshot.linear_damping,
+                angular_damping: snapshot.angular_damping,
             },
         );
         Ok(true)
@@ -328,6 +340,8 @@ impl BulletPacketPhysicsBackend {
                 produces_output: false,
                 casts_contacts: snapshot.flags.casts_contacts,
                 material: snapshot.material,
+                linear_damping: None,
+                angular_damping: None,
             },
         );
         Ok(true)
@@ -459,6 +473,22 @@ impl BulletPacketPhysicsBackend {
                         self.client
                             .reset_base_velocity(record.body_id, Some(vec3_f64(velocity)), None)
                             .map_err(bullet_error)?;
+                    }
+                    applied += 1;
+                }
+                PhysicsCommandKindDto::ApplyImpulse { entity, impulse, point: _ } => {
+                    if let Some(record) = self.records.get(&entity) {
+                        let dynamics = self.client.get_dynamics_info(record.body_id, -1).map_err(bullet_error)?;
+                        let mass = dynamics.mass as f32;
+                        if mass.is_finite() && mass > 1.0e-6 && impulse.iter().all(|v| v.is_finite()) {
+                            let velocity = self.client.get_base_velocity(record.body_id).map_err(bullet_error)?;
+                            let next = [
+                                velocity[0] + (impulse[0] / mass) as f64,
+                                velocity[1] + (impulse[1] / mass) as f64,
+                                velocity[2] + (impulse[2] / mass) as f64,
+                            ];
+                            self.client.reset_base_velocity(record.body_id, Some(next), None).map_err(bullet_error)?;
+                        }
                     }
                     applied += 1;
                 }
@@ -657,12 +687,20 @@ impl BulletPacketPhysicsBackend {
             .iter()
             .take(self.max_queries_per_frame as usize)
         {
-            if let PhysicsQueryKindDto::Ray { origin, dir, max_t } = query.kind {
-                if let Some(hit) =
-                    self.cast_ray(query.seq, query.ignore_entity, origin, dir, max_t)?
-                {
-                    hits.push(hit);
+            match query.kind {
+                PhysicsQueryKindDto::Ray { origin, dir, max_t } => {
+                    if let Some(hit) = self.cast_ray(query.seq, query.ignore_entity, origin, dir, max_t)? {
+                        hits.push(hit);
+                    }
                 }
+                // Bullet's current adapter exposes closest-hit rayTest only. Preserve functional
+                // firearm fallback, while Jolt/Gravitas remains the authoritative all-hit provider.
+                PhysicsQueryKindDto::BallisticRay { origin, dir, max_t, .. } => {
+                    if let Some(hit) = self.cast_ray(query.seq, query.ignore_entity, origin, dir, max_t)? {
+                        hits.push(hit);
+                    }
+                }
+                PhysicsQueryKindDto::Sphere { .. } | PhysicsQueryKindDto::Aabb { .. } => {}
             }
         }
         Ok(hits)
@@ -715,12 +753,16 @@ impl BulletPacketPhysicsBackend {
         let Some(&entity) = self.body_to_entity.get(&hit.object_unique_id) else {
             return Ok(None);
         };
+        let normal = vec3_f32(hit.hit_normal_world);
         Ok(Some(PhysicsQueryHitDto {
             seq,
             entity,
             position: vec3_f32(hit.hit_position_world),
-            normal: vec3_f32(hit.hit_normal_world),
+            normal,
             distance: (hit.hit_fraction as f32).clamp(0.0, 1.0) * max_t,
+            subshape_id: 0,
+            hit_index: 0,
+            back_face: unit[0] * normal[0] + unit[1] * normal[1] + unit[2] * normal[2] > 0.0,
         }))
     }
 }
@@ -943,6 +985,8 @@ mod tests {
             rotation: [0.0, 0.0, 0.0, 1.0],
             linear_velocity: [0.0, 0.0, 0.0],
             angular_velocity: [0.0, 0.0, 0.0],
+            linear_damping: None,
+            angular_damping: None,
             bounds_min: [-10.0, -10.0, -10.0],
             bounds_max: [10.0, 10.0, 10.0],
         }
