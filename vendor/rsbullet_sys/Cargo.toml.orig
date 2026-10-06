@@ -1,0 +1,31 @@
+[package]
+name = "rsbullet_sys"
+version = "0.3.1"
+edition = "2024"
+authors = [
+    "Nathan Kent <nkent2@cs.rochester.edu>",
+    "Marco Boneberger <m.boneberger@tu-bs.de>",
+    "Yixing <yanjizhou312@163.com>",
+]
+homepage = "https://github.com/Robot-Exp-Platform/rsbullet"
+readme = "../README.md"
+license = "MIT"
+description = "Compiles bullet3 and exposes rust bindings to the C API"
+categories = ["science::robotics", "simulation"]
+keywords = ["pybullet", "bullet", "bullet3", "physics", "robotics"]
+exclude = [
+    "bullet3/data/*",
+    "!bullet3/data/sphere8.mtl",
+    "bullet3/examples/pybullet",
+    "bullet3/examples/ThirdPartyLibs/openvr",
+    "bullet3/docs",
+    "bullet3/test",
+]
+
+[lib]
+name = "rsbullet_sys"
+
+[dependencies]
+
+[build-dependencies]
+cmake = "0.1.57"

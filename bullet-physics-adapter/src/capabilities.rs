@@ -1,4 +1,4 @@
-use newengine_physics_api::{
+use newviso_physics_api::{
     PhysicsBackendCapabilities, PhysicsBackendClass, PhysicsFeature, PhysicsLimits,
 };
 
@@ -17,11 +17,14 @@ pub(crate) fn backend_capabilities(
             PhysicsFeature::NativeBackend,
             PhysicsFeature::HeightfieldColliders,
             PhysicsFeature::MeshColliders,
+            PhysicsFeature::AngularVelocity,
+            PhysicsFeature::JointConstraints,
+            PhysicsFeature::CollisionPairFiltering,
         ],
         limits: PhysicsLimits {
             max_bodies,
             max_queries_per_frame,
-            max_substeps: 1,
+            max_substeps: 4,
         },
     }
 }

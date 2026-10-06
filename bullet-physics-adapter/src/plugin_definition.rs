@@ -1,69 +1,90 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-use newengine_physics_api::{
-    PHYSICS_BACKEND_CAPABILITY_ID, PHYSICS_BACKEND_SERVICE_SPEC, PHYSICS_PROVIDER_ABI_ID,
+use newviso_compat_abi::provider::{
+    CapabilityDesc, CapabilityKind, CapabilityRole, PluginDescriptor, PluginKind,
+};
+use newviso_physics_api::{
+    ENGINE_PHYSICS_SERVICE_ID, PHYSICS_BACKEND_CAPABILITY_ID, PHYSICS_PROVIDER_ABI_ID,
     PHYSICS_SERVICE_ID,
 };
-use newengine_plugin_api::prelude::*;
 
 use crate::{
     PHYSICS_BACKEND_ID, PHYSICS_BACKEND_NAME, PHYSICS_BACKEND_VERSION, PHYSICS_PROVIDER_GATEWAY_ID,
 };
 
-const PHYSICS_SERVICES: &[PluginServiceDefinition] = &[plugin_service(
-    PHYSICS_SERVICE_ID,
-    1,
-    r#"{"role":"physics-backend-bridge","contract":"physics.api"}"#,
-)];
-
-const PHYSICS_BACKEND_ROUTES: &[PluginBackendRouteDefinition] = &[optional_backend_route_with_abi(
-    PHYSICS_BACKEND_CAPABILITY_ID,
-    PHYSICS_BACKEND_SERVICE_SPEC,
-    PHYSICS_PROVIDER_ABI_ID,
-    Some(PHYSICS_PROVIDER_GATEWAY_ID),
-    Some("bullet"),
-    None,
-    180,
-    &[],
-    &[],
-    &[],
-)];
-
-const PLUGIN_DEFINITION: PluginDefinition = PluginDefinition {
-    id: PHYSICS_BACKEND_ID,
-    name: PHYSICS_BACKEND_NAME,
-    version: PHYSICS_BACKEND_VERSION,
-    kind: PluginKind::Runtime,
-    services: PHYSICS_SERVICES,
-    backend_routes: PHYSICS_BACKEND_ROUTES,
-    capabilities: &[],
-};
-
 pub(crate) fn descriptor() -> PluginDescriptor {
-    PLUGIN_DEFINITION.descriptor()
-}
-
-/// Native discovery metadata for first-party composition planning.
-pub(crate) fn descriptor_v2() -> PluginDescriptorV2 {
-    PLUGIN_DEFINITION.descriptor_v2()
+    PluginDescriptor {
+        id: PHYSICS_BACKEND_ID.into(),
+        name: PHYSICS_BACKEND_NAME.into(),
+        version: PHYSICS_BACKEND_VERSION.into(),
+        kind: PluginKind::Runtime,
+        capabilities: vec![
+            CapabilityDesc {
+                id: PHYSICS_SERVICE_ID.into(),
+                role: CapabilityRole::Provides,
+                kind: CapabilityKind::ServiceV1,
+                version: 1,
+                describe_json: serde_json::json!({
+                    "role": "physics-backend-bridge",
+                    "service": PHYSICS_SERVICE_ID,
+                    "provider": PHYSICS_BACKEND_ID
+                })
+                .to_string()
+                .into(),
+            },
+            CapabilityDesc {
+                id: PHYSICS_BACKEND_CAPABILITY_ID.into(),
+                role: CapabilityRole::Provides,
+                kind: CapabilityKind::ServiceV1,
+                version: 1,
+                describe_json: serde_json::json!({
+                    "engine_gateway": ENGINE_PHYSICS_SERVICE_ID,
+                    "contract": PHYSICS_SERVICE_ID,
+                    "service_id": PHYSICS_SERVICE_ID,
+                    "backend_priority": 180,
+                    "provider_route": PHYSICS_PROVIDER_GATEWAY_ID,
+                    "provider_abi": PHYSICS_PROVIDER_ABI_ID,
+                    "backend": "bullet",
+                    "features": [
+                        "static-colliders",
+                        "dynamic-bodies",
+                        "kinematic-bodies",
+                        "contacts",
+                        "queries",
+                        "mesh-colliders",
+                        "heightfield-colliders",
+                        "angular-velocity",
+                        "joint-constraints",
+                        "collision-pair-filtering",
+                        "batched-ray-queries"
+                    ]
+                })
+                .to_string()
+                .into(),
+            },
+        ]
+        .into(),
+    }
 }
 
 #[cfg(test)]
-mod abi_tests {
+mod tests {
     use super::*;
 
     #[test]
-    fn bullet_descriptor_conforms_to_physics_provider_contract() {
+    fn descriptor_exposes_current_newviso_physics_contract() {
         let descriptor = descriptor();
-        let report = newengine_contract_conformance::validate_provider_abi(
-            &descriptor,
-            newengine_physics_api::PHYSICS_BACKEND_SERVICE_SPEC,
-            newengine_physics_api::PHYSICS_PROVIDER_ABI_CONTRACT_SPEC,
-        )
-        .expect("provider descriptor contract conformance");
-        assert_eq!(
-            report.contract_key,
-            newengine_physics_api::PHYSICS_PROVIDER_ABI_CONTRACT_SPEC.key
-        );
+        assert_eq!(descriptor.id.as_str(), PHYSICS_BACKEND_ID);
+        assert!(descriptor.capabilities.iter().any(|capability| {
+            capability.id.as_str() == PHYSICS_SERVICE_ID
+                && capability.role == CapabilityRole::Provides
+        }));
+        assert!(descriptor.capabilities.iter().any(|capability| {
+            capability.id.as_str() == PHYSICS_BACKEND_CAPABILITY_ID
+                && capability
+                    .describe_json
+                    .as_str()
+                    .contains(PHYSICS_PROVIDER_ABI_ID)
+        }));
     }
 }

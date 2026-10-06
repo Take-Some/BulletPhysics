@@ -4,37 +4,30 @@ use std::sync::{Arc, Mutex};
 
 mod backend;
 mod capabilities;
+mod config;
 mod plugin_definition;
+#[cfg(test)]
+mod service_tests;
 
 use abi_stable::erased_types::TD_Opaque;
+use abi_stable::prefix_type::PrefixTypeTrait;
 use abi_stable::std_types::{RResult, RString, RVec};
 use backend::BulletPacketPhysicsBackend;
-use newengine_physics_api::*;
-use newengine_plugin_api::prelude::*;
+use config::{parse_backend_config, PhysicsPluginConfig, DEFAULT_SETTINGS_JSON};
+use newviso_compat_abi::{
+    provider::{
+        Blob, CapabilityId, ConfigApplyResultV1, ConfigBlobV1, ConfigDiagV1, ConfigPatchV1,
+        HostApiV1, MethodName, PluginDescriptor, PluginModule, PluginModuleDyn, PluginModule_TO,
+        PluginRootV1, PluginRootV1Ref, ServiceV1, ServiceV1_TO,
+    },
+    signature::{BootstrapPhase, ProviderKind, ProviderSignatureV1},
+};
+use newviso_physics_api::*;
 
 pub const PHYSICS_BACKEND_ID: &str = "engine.physics.bullet";
 pub const PHYSICS_PROVIDER_GATEWAY_ID: &str = "engine.physics.bullet";
 pub const PHYSICS_BACKEND_NAME: &str = "Bullet Physics";
 pub const PHYSICS_BACKEND_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-const DEFAULT_SETTINGS_JSON: &str = r#"{"debug_text":"North Star | Bullet Physics","max_bodies":16384,"max_queries_per_frame":4096}"#;
-
-#[derive(Debug, Clone)]
-struct PhysicsPluginConfig {
-    debug_text: String,
-    max_bodies: u32,
-    max_queries_per_frame: u32,
-}
-
-impl Default for PhysicsPluginConfig {
-    fn default() -> Self {
-        Self {
-            debug_text: "North Star | Bullet Physics".to_owned(),
-            max_bodies: 16 * 1024,
-            max_queries_per_frame: 4096,
-        }
-    }
-}
 
 #[derive(Default)]
 struct PhysicsPlugin {
@@ -56,15 +49,14 @@ impl PhysicsPlugin {
                 backend_id: PHYSICS_BACKEND_ID.to_owned(),
                 backend_name: PHYSICS_BACKEND_NAME.to_owned(),
                 backend_version: PHYSICS_BACKEND_VERSION.to_owned(),
-                debug_text: config.debug_text,
+                debug_text: config.debug_text.clone(),
                 capabilities: capabilities::backend_capabilities(
                     config.max_bodies,
                     config.max_queries_per_frame,
                 ),
                 protocol_version: PhysicsApiVersion::default(),
             },
-            config.max_bodies,
-            config.max_queries_per_frame,
+            config,
         );
 
         let dyn_svc = ServiceV1_TO::from_value(service, TD_Opaque);
@@ -168,17 +160,15 @@ impl PluginModule for PhysicsPlugin {
 struct PacketPhysicsBackend {
     native: Option<BulletPacketPhysicsBackend>,
     init_error: Option<String>,
-    max_bodies: u32,
-    max_queries_per_frame: u32,
+    settings: PhysicsPluginConfig,
 }
 
 impl PacketPhysicsBackend {
-    fn new(max_bodies: u32, max_queries_per_frame: u32) -> Self {
+    fn new(settings: PhysicsPluginConfig) -> Self {
         Self {
             native: None,
             init_error: None,
-            max_bodies,
-            max_queries_per_frame,
+            settings,
         }
     }
 
@@ -187,7 +177,13 @@ impl PacketPhysicsBackend {
             return Err(error.clone());
         }
         if self.native.is_none() {
-            match BulletPacketPhysicsBackend::new(self.max_bodies, self.max_queries_per_frame) {
+            match BulletPacketPhysicsBackend::with_settings(
+                self.settings.max_bodies,
+                self.settings.max_queries_per_frame,
+                self.settings.query_batch_size as usize,
+                self.settings.query_threads as i32,
+                self.settings.profile_steps,
+            ) {
                 Ok(native) => self.native = Some(native),
                 Err(error) => {
                     self.init_error = Some(error.clone());
@@ -214,16 +210,15 @@ impl PacketPhysicsBackend {
 struct PhysicsBackendService {
     backend: Arc<Mutex<PacketPhysicsBackend>>,
     info: PhysicsBackendInfo,
+    settings: PhysicsPluginConfig,
 }
 
 impl PhysicsBackendService {
-    fn new(info: PhysicsBackendInfo, max_bodies: u32, max_queries_per_frame: u32) -> Self {
+    fn new(info: PhysicsBackendInfo, settings: PhysicsPluginConfig) -> Self {
         Self {
-            backend: Arc::new(Mutex::new(PacketPhysicsBackend::new(
-                max_bodies,
-                max_queries_per_frame,
-            ))),
+            backend: Arc::new(Mutex::new(PacketPhysicsBackend::new(settings.clone()))),
             info,
+            settings,
         }
     }
 
@@ -259,13 +254,32 @@ impl PhysicsBackendService {
             .copied()
             .filter(|feature| !self.info.capabilities.supports(*feature))
             .collect::<Vec<_>>();
+        let backend_version = self.info.protocol_version;
+        let version_compatible = request.preferred_version.major == backend_version.major;
+        let accepted_version = PhysicsApiVersion {
+            major: backend_version.major,
+            minor: request.preferred_version.minor.min(backend_version.minor),
+            patch: if request.preferred_version.minor == backend_version.minor {
+                request.preferred_version.patch.min(backend_version.patch)
+            } else {
+                0
+            },
+        };
+        let mut notices = Vec::new();
+        if !version_compatible {
+            notices.push(serde_json::json!({
+                "code": "physics.protocol_major_mismatch",
+                "requested": request.preferred_version,
+                "backend": backend_version,
+            }));
+        }
         PhysicsCapabilityNegotiationResponse {
-            accepted_version: PhysicsApiVersion::default(),
-            backend_version: self.info.protocol_version,
-            ok: missing_required_features.is_empty(),
+            accepted_version,
+            backend_version,
+            ok: version_compatible && missing_required_features.is_empty(),
             enabled_features,
             missing_required_features,
-            notices: Vec::new(),
+            notices,
         }
     }
 
@@ -275,6 +289,18 @@ impl PhysicsBackendService {
                 PhysicsServiceResponse::Negotiation(self.negotiate(request))
             }
             PhysicsServiceRequest::StepFrame(input) => {
+                if let Err(error) = validate_frame(&input) {
+                    return PhysicsServiceResponse::Problem(
+                        PhysicsProblemDetails::new(
+                            "physics_invalid_frame",
+                            "Physics frame validation failed",
+                            error,
+                        )
+                        .with_backend(PHYSICS_BACKEND_ID)
+                        .with_phase("validate")
+                        .recoverable(true),
+                    );
+                }
                 self.with_backend(|backend| match backend.step(input) {
                     Ok(output) => PhysicsServiceResponse::FrameOutput(output),
                     Err(error) => PhysicsServiceResponse::Problem(
@@ -307,12 +333,14 @@ impl ServiceV1 for PhysicsBackendService {
             "methods": [
                 PHYSICS_SERVICE_METHOD_INFO,
                 PHYSICS_SERVICE_METHOD_INVOKE,
+                "bullet.metrics.v1",
                 PHYSICS_SERVICE_METHOD_SHUTDOWN_V1
             ],
             "backend_id": self.info.backend_id,
             "backend_name": self.info.backend_name,
             "backend_version": self.info.backend_version,
             "capabilities": self.info.capabilities,
+            "settings": self.settings,
         })
         .to_string()
         .into()
@@ -321,6 +349,15 @@ impl ServiceV1 for PhysicsBackendService {
     fn call(&self, method: MethodName, payload: Blob) -> RResult<Blob, RString> {
         match method.as_str() {
             PHYSICS_SERVICE_METHOD_INFO => Self::ok_json(&self.info),
+            "bullet.metrics.v1" => self.with_backend(|backend| {
+                Self::ok_json(&serde_json::json!({
+                    "schema": "newviso.bullet.metrics.v1",
+                    "initialized": backend.native.is_some(),
+                    "settings": backend.settings,
+                    "frame": backend.native.as_ref().map(|native| &native.metrics),
+                    "init_error": backend.init_error,
+                }))
+            }),
             PHYSICS_SERVICE_METHOD_SHUTDOWN_V1 => {
                 self.with_backend(PacketPhysicsBackend::shutdown);
                 RResult::ROk(Blob::from(Vec::new()))
@@ -335,29 +372,6 @@ impl ServiceV1 for PhysicsBackendService {
             unknown => RResult::RErr(format!("physics service: unknown method '{unknown}'").into()),
         }
     }
-}
-
-fn parse_backend_config(blob: &ConfigBlobV1) -> Result<PhysicsPluginConfig, String> {
-    if blob.bytes.is_empty() {
-        return Ok(PhysicsPluginConfig::default());
-    }
-    let parsed = parse_json_object(blob.bytes.as_slice(), "Bullet config")?;
-    let mut config = PhysicsPluginConfig::default();
-    if let Some(value) = parsed.get("debug_text").and_then(serde_json::Value::as_str) {
-        config.debug_text = value.to_owned();
-    }
-    if let Some(value) = parsed.get("max_bodies").and_then(serde_json::Value::as_u64) {
-        config.max_bodies = value.min(u32::MAX as u64) as u32;
-        config.max_bodies = config.max_bodies.clamp(128, 1_048_576);
-    }
-    if let Some(value) = parsed
-        .get("max_queries_per_frame")
-        .and_then(serde_json::Value::as_u64)
-    {
-        config.max_queries_per_frame = value.min(u32::MAX as u64) as u32;
-        config.max_queries_per_frame = config.max_queries_per_frame.clamp(1, 65_536);
-    }
-    Ok(config)
 }
 
 fn parse_json_object(raw: &[u8], what: &str) -> Result<serde_json::Value, String> {
@@ -385,22 +399,24 @@ fn merge_json_replace(dst: &mut serde_json::Value, src: &serde_json::Value) {
     }
 }
 
-/// Returns the Bullet physics plugin signature for the stable ABI boundary.
-///
-/// # Safety
-///
-/// The caller must load this symbol from an ABI-compatible plugin binary and
-/// consume the returned value according to the NewEngine plugin host contract.
+extern "C" fn create_module() -> PluginModuleDyn<'static> {
+    PluginModule_TO::from_value(PhysicsPlugin::default(), TD_Opaque)
+}
+
 #[no_mangle]
-pub unsafe extern "C" fn newengine_plugin_signature_v1() -> PluginSignatureV1 {
-    PluginSignatureV1 {
-        id: PHYSICS_BACKEND_ID.into(),
-        name: PHYSICS_BACKEND_NAME.into(),
-        version: PHYSICS_BACKEND_VERSION.into(),
-        kind: PluginKind::Runtime,
-        bootstrap_phase: PluginBootstrapPhase::Engine,
+pub extern "C" fn newengine_plugin_signature_v1() -> ProviderSignatureV1 {
+    ProviderSignatureV1 {
+        id: RString::from(PHYSICS_BACKEND_ID),
+        name: RString::from(PHYSICS_BACKEND_NAME),
+        version: RString::from(PHYSICS_BACKEND_VERSION),
+        kind: ProviderKind::Runtime,
+        bootstrap_phase: BootstrapPhase::Engine,
     }
 }
 
-export_newengine_plugin_descriptor_v2!(crate::plugin_definition::descriptor_v2);
-export_newengine_plugin!(module = PhysicsPlugin::default());
+#[no_mangle]
+pub extern "C" fn newengine_plugin_root_v1() -> PluginRootV1Ref {
+    PluginRootV1::leak_into_prefix(PluginRootV1 {
+        create: create_module,
+    })
+}

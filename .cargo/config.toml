@@ -1,8 +1,17 @@
+[build]
+target-dir = "C:\\NSB\\BP"
+
 [env]
 NORTHSTAR_PLUGIN_INSTALL_NAME = "bullet-physics"
+CMAKE = "C:\\msys64\\mingw64\\bin\\cmake.exe"
 CMAKE_GENERATOR = "Ninja"
-CC = "clang-cl"
-CXX = "clang-cl"
-CMAKE_C_COMPILER = "clang-cl"
-CMAKE_CXX_COMPILER = "clang-cl"
+CMAKE_MAKE_PROGRAM = "C:\\msys64\\mingw64\\bin\\ninja.exe"
+CC = "C:\\msys64\\mingw64\\bin\\gcc.exe"
+CXX = "C:\\msys64\\mingw64\\bin\\g++.exe"
+CMAKE_C_COMPILER = "C:\\msys64\\mingw64\\bin\\gcc.exe"
+CMAKE_CXX_COMPILER = "C:\\msys64\\mingw64\\bin\\g++.exe"
+RC = "C:\\msys64\\mingw64\\bin\\windres.exe"
 
+[target.x86_64-pc-windows-gnu]
+linker = "C:\\msys64\\mingw64\\bin\\gcc.exe"
+ar = "C:\\msys64\\mingw64\\bin\\ar.exe"

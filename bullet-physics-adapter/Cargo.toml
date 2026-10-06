@@ -1,14 +1,14 @@
 [package]
 name = "engine-physics-bullet"
-version = "0.1.0"
+version = "0.3.0"
 build = "build.rs"
 edition = "2021"
 description = "North Star engine.physics provider route backed by Bullet Physics"
 license = "Proprietary"
 
 [dependencies]
-newengine-plugin-api = { workspace = true }
-newengine-physics-api = { workspace = true }
+newviso-compat-abi = { workspace = true }
+newviso-physics-api = { workspace = true }
 rsbullet-core = { workspace = true }
 nalgebra = { workspace = true }
 abi_stable = { workspace = true }
@@ -27,6 +27,3 @@ crate-type = ["cdylib"]
 
 [build-dependencies]
 embed-resource = "3.0.6"
-
-[dev-dependencies]
-newengine-contract-conformance = { path = "../../../NewEngine/neocore2/crates/newengine-contract-conformance" }
