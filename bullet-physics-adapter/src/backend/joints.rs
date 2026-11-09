@@ -6,150 +6,14 @@ pub(super) struct JointRecord {
     native_id: i32,
     definition: PhysicsJointSnapshot,
     effective_angular_inertia: f64,
+    parent_inverse_mass: f64,
+    child_inverse_mass: f64,
+    parent_inverse_inertia: [f64; 3],
+    child_inverse_inertia: [f64; 3],
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn body(id: u64, position: [f32; 3], kind: PhysicsBodyKind) -> PhysicsBodySnapshot {
-        PhysicsBodySnapshot {
-            entity: id,
-            kind,
-            shape: CollisionShape::Sphere { radius: 0.15 },
-            flags: PhysicsBodyFlags {
-                casts_contacts: true,
-                participates_in_queries: true,
-                ..Default::default()
-            },
-            material: PhysicsMaterial {
-                friction: 0.7,
-                restitution: 0.0,
-                density: 100.0,
-            },
-            position,
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            linear_velocity: [0.0; 3],
-            angular_velocity: [0.0; 3],
-            linear_damping: Some(0.02),
-            angular_damping: Some(0.2),
-            mass_properties: None,
-            convex_hulls: vec![],
-            bounds_min: [-0.15; 3],
-            bounds_max: [0.15; 3],
-        }
-    }
-    #[test]
-    fn small_limb_cone_stop_dissipates_fast_spin_without_exploding() {
-        let mut backend = BulletPacketPhysicsBackend::new(32, 32).unwrap();
-        let mut input = PhysicsFrameInput::empty(1, 1, 1.0 / 60.0);
-        let mut limb = body(2, [0.0, 3.0, 0.0], PhysicsBodyKind::Dynamic);
-        limb.shape = CollisionShape::Sphere { radius: 0.035 };
-        limb.material.density = 650.0;
-        limb.bounds_min = [-0.035; 3];
-        limb.bounds_max = [0.035; 3];
-        limb.rotation = [0.0, 0.0, 0.43496552, 0.90044713];
-        input.bodies = vec![body(1, [0.0, 3.0, 0.0], PhysicsBodyKind::Static), limb];
-        input.joints.push(PhysicsJointSnapshot {
-            id: 9,
-            parent: 1,
-            child: 2,
-            parent_anchor: [0.0; 3],
-            child_anchor: [0.0; 3],
-            parent_frame_rotation: [0.0, 0.0, 0.0, 1.0],
-            child_frame_rotation: [0.0, 0.0, 0.0, 1.0],
-            max_force: 30000.0,
-            cone_limit: 0.2,
-            angular_stiffness: 12.0,
-            angular_damping: 0.04,
-            collision_family: 7,
-        });
-        input.commands.push(PhysicsCommand {
-            seq: 1,
-            kind: PhysicsCommandKind::SetAngularVelocity {
-                entity: 2,
-                velocity: [0.0, 0.0, 80.0],
-            },
-        });
-        let mut max_spin = 0.0f32;
-        let mut angle = 10.0f32;
-        for frame in 1..=180 {
-            input.fixed_tick = frame;
-            input.frame_index = frame;
-            let output = backend.step_frame(input.clone()).unwrap();
-            input.commands.clear();
-            let pose = output.pose_updates.iter().find(|p| p.entity == 2).unwrap();
-            max_spin = max_spin.max(
-                output
-                    .velocity_updates
-                    .iter()
-                    .find(|v| v.entity == 2)
-                    .unwrap()
-                    .angular_velocity
-                    .iter()
-                    .map(|v| v * v)
-                    .sum::<f32>()
-                    .sqrt(),
-            );
-            angle = 2.0 * pose.rotation[3].abs().clamp(0.0, 1.0).acos();
-            assert!((pose.position[1] - 3.0).abs() < 0.03);
-        }
-        assert!(max_spin < 85.0, "unstable small-limb torque: {max_spin}");
-        assert!(angle < 0.25, "cone failed to settle: {angle}");
-    }
-    #[test]
-    fn native_socket_holds_under_gravity_and_is_removed_with_its_body() {
-        let mut backend = BulletPacketPhysicsBackend::new(32, 32).unwrap();
-        let mut input = PhysicsFrameInput::empty(1, 1, 1.0 / 120.0);
-        input.bodies = vec![
-            body(1, [0.0, 3.0, 0.0], PhysicsBodyKind::Static),
-            body(2, [0.0, 2.0, 0.0], PhysicsBodyKind::Dynamic),
-        ];
-        input.joints.push(PhysicsJointSnapshot {
-            id: 9,
-            parent: 1,
-            child: 2,
-            parent_anchor: [0.0, -0.5, 0.0],
-            child_anchor: [0.0, 0.5, 0.0],
-            parent_frame_rotation: [0.0, 0.0, 0.0, 1.0],
-            child_frame_rotation: [0.0, 0.0, 0.0, 1.0],
-            max_force: 30000.0,
-            cone_limit: 1.5,
-            angular_stiffness: 8.0,
-            angular_damping: 0.03,
-            collision_family: 7,
-        });
-        input.commands.push(PhysicsCommand {
-            seq: 1,
-            kind: PhysicsCommandKind::SetLinearVelocity {
-                entity: 2,
-                velocity: [2.0, 0.0, 0.0],
-            },
-        });
-        let mut maximum_error = 0.0f32;
-        for frame in 1..=240 {
-            input.frame_index = frame;
-            input.fixed_tick = frame;
-            let output = backend.step_frame(input.clone()).unwrap();
-            input.commands.clear();
-            let pose = output.pose_updates.iter().find(|p| p.entity == 2).unwrap();
-            let pivot =
-                physics_pose(pose.position, pose.rotation) * nalgebra::Point3::new(0.0, 0.5, 0.0);
-            maximum_error =
-                maximum_error.max((pivot - nalgebra::Point3::new(0.0, 2.5, 0.0)).norm() as f32);
-        }
-        assert!(maximum_error < 0.03, "native joint drift={maximum_error}");
-        assert_eq!(backend.joints.len(), 1);
-        input.joints.clear();
-        input.bodies.retain(|b| b.entity == 2);
-        let output = backend.step_frame(input).unwrap();
-        assert!(backend.joints.is_empty());
-        assert!(backend.joint_filtered_pairs.is_empty());
-        assert!(output
-            .events
-            .iter()
-            .any(|e| matches!(e, PhysicsEvent::BodyDestroyed { entity: 1 })));
-    }
-}
+mod tests;
 
 impl BulletPacketPhysicsBackend {
     pub(super) fn configure_joint_solver(
@@ -179,14 +43,21 @@ impl BulletPacketPhysicsBackend {
         let stale: Vec<_> = self
             .joints
             .iter()
-            .filter_map(|(id, record)| (desired.get(id) != Some(&record.definition)).then_some(*id))
+            .filter_map(|(id, record)| {
+                (!desired
+                    .get(id)
+                    .is_some_and(|next| same_socket(*next, record.definition)))
+                .then_some(*id)
+            })
             .collect();
         let mut changed = !stale.is_empty();
         for id in stale {
             self.remove_joint(id)?;
         }
         for definition in requested {
-            if self.joints.contains_key(&definition.id) {
+            if let Some(record) = self.joints.get_mut(&definition.id) {
+                // Drive targets change continuously; native anchors stay resident.
+                record.definition = *definition;
                 continue;
             }
             let parent = self
@@ -247,6 +118,30 @@ impl BulletPacketPhysicsBackend {
                     native_id,
                     definition: *definition,
                     effective_angular_inertia,
+                    parent_inverse_mass: if parent_dynamics.mass > 0.0 {
+                        1.0 / parent_dynamics.mass
+                    } else {
+                        0.0
+                    },
+                    child_inverse_mass: if child_dynamics.mass > 0.0 {
+                        1.0 / child_dynamics.mass
+                    } else {
+                        0.0
+                    },
+                    parent_inverse_inertia: parent_dynamics.local_inertia_diagonal.map(|v| {
+                        if parent_dynamics.mass > 0.0 {
+                            1.0 / v.max(1e-8)
+                        } else {
+                            0.0
+                        }
+                    }),
+                    child_inverse_inertia: child_dynamics.local_inertia_diagonal.map(|v| {
+                        if child_dynamics.mass > 0.0 {
+                            1.0 / v.max(1e-8)
+                        } else {
+                            0.0
+                        }
+                    }),
                 },
             );
             changed = true;
@@ -337,60 +232,225 @@ impl BulletPacketPhysicsBackend {
         Ok(())
     }
 
-    pub(super) fn apply_joint_angular_limits(&mut self, dt: f64) -> Result<(), String> {
-        // The C API exposes native point constraints. A bounded equal/opposite
-        // torque supplies a compliant cone stop and relative angular damping.
-        // No pose reset or animation drives a simulated limb.
+    pub(super) fn apply_joint_angular_limits(
+        &mut self,
+        dt: f64,
+        gravity: f64,
+    ) -> Result<(), String> {
+        use super::joint_drives::{DriveBody, DriveRow};
         let definitions: Vec<_> = self
             .joints
             .values()
-            .map(|record| (record.definition, record.effective_angular_inertia))
+            .map(|r| {
+                (
+                    r.definition,
+                    r.effective_angular_inertia,
+                    r.parent_inverse_inertia,
+                    r.child_inverse_inertia,
+                    r.parent_inverse_mass,
+                    r.child_inverse_mass,
+                )
+            })
             .collect();
-        for (j, inertia) in definitions {
-            let parent = self.records[&j.parent].body_id;
-            let child = self.records[&j.child].body_id;
-            let (a, av) = self.pre_step_base_state(parent)?;
-            let (b, bv) = self.pre_step_base_state(child)?;
-            let frame_a = a.rotation * physics_pose([0.0; 3], j.parent_frame_rotation).rotation;
-            let frame_b = b.rotation * physics_pose([0.0; 3], j.child_frame_rotation).rotation;
-            let relative = frame_a.inverse() * frame_b;
-            let displacement = relative.scaled_axis();
-            let angle = displacement.norm();
-            let excess = if angle > j.cone_limit as f64 {
-                displacement * ((angle - j.cone_limit as f64) / angle)
-            } else {
-                Vector3::zeros()
-            };
-            let relative_spin = Vector3::new(bv[3] - av[3], bv[4] - av[4], bv[5] - av[5]);
+        let mut indices = BTreeMap::<u64, usize>::new();
+        let mut native_ids = Vec::new();
+        let mut bodies = Vec::<DriveBody>::new();
+        let mut positions = Vec::new();
+        let mut inverse_masses = Vec::new();
+        for (j, _, parent, child, pa, ca) in &definitions {
+            for (entity, inertia, mass) in [(j.parent, *parent, *pa), (j.child, *child, *ca)] {
+                if indices.contains_key(&entity) {
+                    continue;
+                }
+                let native = self.records[&entity].body_id;
+                let (pose, v) = self.pre_step_base_state(native)?;
+                let rotation = pose.rotation.to_rotation_matrix();
+                let inverse = rotation.matrix()
+                    * nalgebra::Matrix3::from_diagonal(&Vector3::from(inertia))
+                    * rotation.matrix().transpose();
+                indices.insert(entity, bodies.len());
+                native_ids.push(native);
+                positions.push(pose.translation.vector);
+                inverse_masses.push(mass);
+                bodies.push(DriveBody {
+                    linear_velocity: Vector3::new(v[0], v[1], v[2]),
+                    rotation: pose.rotation,
+                    spin: Vector3::new(v[3], v[4], v[5]),
+                    inverse_inertia: inverse,
+                });
+            }
+        }
+        let mut rows = Vec::with_capacity(definitions.len() * 2);
+        let mut constraints = Vec::new();
+        for (j, inertia, _, _, _, _) in definitions {
+            let parent = indices[&j.parent];
+            let child = indices[&j.child];
+            let parent_com = self.records[&j.parent]
+                .mass_properties
+                .map_or([0.0; 3], |p| p.center_of_mass);
+            let child_com = self.records[&j.child]
+                .mass_properties
+                .map_or([0.0; 3], |p| p.center_of_mass);
+            let ra = bodies[parent].rotation
+                * Vector3::from(std::array::from_fn::<_, 3, _>(|i| {
+                    (j.parent_anchor[i] - parent_com[i]) as f64
+                }));
+            let rb = bodies[child].rotation
+                * Vector3::from(std::array::from_fn::<_, 3, _>(|i| {
+                    (j.child_anchor[i] - child_com[i]) as f64
+                }));
+            constraints.extend(super::joint_mobility::point_rows(
+                Some(parent),
+                Some(child),
+                ra,
+                rb,
+            ));
             if inertia <= 0.0 {
                 continue;
             }
-            // Implicit spring/damping prevents a small hand's inertia from
-            // turning a cone-stop torque into hundreds of radians per second.
-            let stiffness = if excess.norm_squared() > 1e-12 {
-                j.angular_stiffness as f64
-            } else {
-                0.0
-            };
-            let damping = (j.angular_damping as f64).max(2.0 * (stiffness * inertia).sqrt());
-            let implicit = 1.0 + (damping * dt + stiffness * dt * dt) / inertia;
-            let mut torque = (-(frame_a * excess) * stiffness
-                - relative_spin * (damping + stiffness * dt))
-                / implicit;
-            let length = torque.norm();
-            if length > 40.0 {
-                torque *= 40.0 / length;
+            let frame_a =
+                bodies[parent].rotation * physics_pose([0.0; 3], j.parent_frame_rotation).rotation;
+            let frame_b =
+                bodies[child].rotation * physics_pose([0.0; 3], j.child_frame_rotation).rotation;
+            for (term_index, (error, stiffness, damping, max_torque)) in
+                super::joint_drives::terms(j, frame_a.inverse() * frame_b)
+                    .into_iter()
+                    .enumerate()
+            {
+                let feed_forward = if term_index == 1 {
+                    j.motor.map_or(Vector3::zeros(), |m| {
+                        frame_a * Vector3::from(m.feed_forward_torque.map(|v| v as f64))
+                    })
+                } else {
+                    Vector3::zeros()
+                };
+                if max_torque <= 0.0
+                    || (stiffness == 0.0
+                        && damping == 0.0
+                        && feed_forward.norm_squared() == 0.0
+                        && (term_index != 1 || j.motor.is_none_or(|m| m.world_drive.is_none())))
+                {
+                    continue;
+                }
+                let world_drive = if term_index == 1 {
+                    j.motor.and_then(|m| m.world_drive).map(|g| {
+                        let is_child = g.body == newviso_physics_api::PhysicsJointBody::Child;
+                        let controlled = if is_child { child } else { parent };
+                        super::joint_drives::WorldDrive {
+                            child: is_child,
+                            error: (bodies[controlled].rotation
+                                * physics_pose([0.0; 3], g.target_rotation).rotation.inverse())
+                            .scaled_axis()
+                                * (if is_child { 1.0 } else { -1.0 }),
+                            stiffness: g.stiffness as f64,
+                            damping: g.damping as f64,
+                        }
+                    })
+                } else {
+                    None
+                };
+                rows.push(DriveRow {
+                    world_drive,
+                    parent,
+                    child,
+                    error: frame_a * error,
+                    stiffness,
+                    damping: damping.max(2.0 * (stiffness * inertia).sqrt()),
+                    max_torque,
+                    feed_forward,
+                });
             }
-            if torque.norm_squared() < 1e-10 {
+        }
+        // Loaded normal rows determine the supported inertia. Tangential
+        // friction stays finite in Bullet; it is never a three-axis socket.
+        for contact in self
+            .client
+            .get_contact_points(None, None, None, None)
+            .map_err(bullet_error)?
+        {
+            if !contact.contact_distance.is_finite() {
+                continue;
+            }
+            let a = self
+                .body_to_entity
+                .get(&contact.body_a)
+                .and_then(|e| indices.get(e))
+                .copied();
+            let b = self
+                .body_to_entity
+                .get(&contact.body_b)
+                .and_then(|e| indices.get(e))
+                .copied();
+            if a.is_none() && b.is_none() {
+                continue;
+            }
+            let external_dynamic = |native, own: Option<usize>| {
+                own.is_none()
+                    && self
+                        .body_to_entity
+                        .get(&native)
+                        .and_then(|e| self.records.get(e))
+                        .is_some_and(|r| r.kind == PhysicsBodyKindDto::Dynamic)
+            };
+            if external_dynamic(contact.body_a, a) || external_dynamic(contact.body_b, b) {
+                continue;
+            }
+            let ra = a.map_or(Vector3::zeros(), |i| {
+                Vector3::from(contact.position_on_a) - positions[i]
+            });
+            let rb = b.map_or(Vector3::zeros(), |i| {
+                Vector3::from(contact.position_on_b) - positions[i]
+            });
+            let material_friction = |native| {
+                self.body_to_entity
+                    .get(&native)
+                    .and_then(|e| self.records.get(e))
+                    .map_or(0.0, |r| r.material.friction as f64)
+            };
+            let mut row = super::joint_mobility::contact_row(
+                a,
+                b,
+                ra,
+                rb,
+                Vector3::from(contact.contact_normal_on_b),
+                (material_friction(contact.body_a) * material_friction(contact.body_b))
+                    .clamp(0.0, 10.0),
+            );
+            // Zero-load contacts may become load bearing. A positive gap only
+            // permits a reaction if this tick's predicted motion closes it.
+            row.velocity_bias = contact.contact_distance.max(0.0) / dt;
+            constraints.push(row);
+        }
+        let impulses = super::joint_mobility::solve_with_gravity(
+            &bodies,
+            &inverse_masses,
+            &rows,
+            &constraints,
+            dt,
+            gravity,
+        );
+        for (native, impulse) in native_ids.into_iter().zip(impulses) {
+            if impulse.norm_squared() < 1e-20 {
                 continue;
             }
             self.client
-                .apply_external_torque(child, -1, <[f64; 3]>::from(torque), ForceFrame::World)
-                .map_err(bullet_error)?;
-            self.client
-                .apply_external_torque(parent, -1, <[f64; 3]>::from(-torque), ForceFrame::World)
+                .apply_external_torque(
+                    native,
+                    -1,
+                    <[f64; 3]>::from(impulse / dt),
+                    ForceFrame::World,
+                )
                 .map_err(bullet_error)?;
         }
         Ok(())
     }
+}
+
+fn same_socket(mut a: PhysicsJointSnapshot, b: PhysicsJointSnapshot) -> bool {
+    a.cone_limit = b.cone_limit;
+    a.angular_stiffness = b.angular_stiffness;
+    a.angular_damping = b.angular_damping;
+    a.angular_limits = b.angular_limits;
+    a.motor = b.motor;
+    a == b
 }

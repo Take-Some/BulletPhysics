@@ -19,6 +19,9 @@ pub(crate) fn backend_capabilities(
             PhysicsFeature::MeshColliders,
             PhysicsFeature::AngularVelocity,
             PhysicsFeature::JointConstraints,
+            PhysicsFeature::JointAngularLimits,
+            PhysicsFeature::JointMotors,
+            PhysicsFeature::ContactManifolds,
             PhysicsFeature::CollisionPairFiltering,
         ],
         limits: PhysicsLimits {

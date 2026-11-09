@@ -3,6 +3,8 @@ use std::f64::consts::PI;
 use std::time::Duration;
 mod box_surfaces;
 mod collision_filters;
+mod joint_drives;
+mod joint_mobility;
 mod joints;
 #[cfg(test)]
 mod performance_tests;
@@ -210,7 +212,18 @@ impl BulletPacketPhysicsBackend {
                 body.kind == PhysicsBodyKindDto::Dynamic && body.flags.continuous_collision
             }),
         )?;
-        self.apply_joint_angular_limits(input.dt as f64)?;
+        if !input.joints.is_empty()
+            && output
+                .events
+                .iter()
+                .any(|e| matches!(e, PhysicsEventDto::BodyCreated { .. }))
+        {
+            // Populate first-touch manifolds before predicting drive response.
+            self.client
+                .perform_collision_detection()
+                .map_err(bullet_error)?;
+        }
+        self.apply_joint_angular_limits(input.dt as f64, input.gravity.abs() as f64)?;
         // Measure approach velocity before the solver removes it at impact.
         self.capture_contact_velocities()?;
         self.client.step_simulation().map_err(bullet_error)?;
@@ -1024,6 +1037,7 @@ impl BulletPacketPhysicsBackend {
             .get_contact_points(None, None, None, None)
             .map_err(bullet_error)?;
         let mut current = BTreeMap::<(u64, u64), ContactSample>::new();
+        let mut manifolds = BTreeMap::<(u64, u64), Vec<PhysicsContactPoint>>::new();
         for point in points {
             let Some(&entity_a) = self.body_to_entity.get(&point.body_a) else {
                 continue;
@@ -1057,6 +1071,18 @@ impl BulletPacketPhysicsBackend {
                 normal,
                 impulse: (point.normal_force * dt.max(0.0) as f64) as f32,
             };
+            if self.records[&entity_a].kind == PhysicsBodyKindDto::Dynamic
+                || self.records[&entity_b].kind == PhysicsBodyKindDto::Dynamic
+            {
+                manifolds
+                    .entry(pair)
+                    .or_default()
+                    .push(PhysicsContactPoint {
+                        position: sample.point,
+                        normal: sample.normal,
+                        impulse: sample.impulse,
+                    });
+            }
             current
                 .entry(pair)
                 .and_modify(|existing| {
@@ -1070,6 +1096,10 @@ impl BulletPacketPhysicsBackend {
                 .or_insert(sample);
         }
 
+        output.contact_manifolds = manifolds
+            .into_iter()
+            .map(|((a, b), points)| PhysicsContactManifold { a, b, points })
+            .collect();
         for (&(a, b), sample) in &current {
             let (relative_velocity, materials) = match (
                 self.contact_velocities.get(&a),

@@ -310,6 +310,8 @@ fn explicit_filter_survives_joint_removal_and_body_recreation() {
         angular_stiffness: 0.0,
         angular_damping: 0.0,
         collision_family: 1,
+        angular_limits: None,
+        motor: None,
     });
     backend.step_frame(frame.clone()).unwrap();
     frame.joints.clear();
